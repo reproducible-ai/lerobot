@@ -8,14 +8,15 @@ secrets:
   - HF_TOKEN            # roar put upload (the dataset itself is fetched anonymously)
 
 # WHY `PYTHONPATH=src python -m lerobot.scripts.lerobot_train` AND NOT `lerobot-train`:
-# the traced steps must be self-sufficient on a bare clone. `pip install -e .`
+# the traced steps must be self-sufficient on a bare clone. Installing the package
 # happens in the untraced setup stage, so it is NOT part of the recorded pipeline
 # and is not replayed on a rebuild host; the console script it generates would not
 # exist there. The third-party dependencies ARE replayed (they are ordinary
 # resolvable pins in the recorded freeze), so the only missing piece is lerobot's
-# own package -- which `PYTHONPATH=src` supplies straight from the cloned repo.
-# lerobot/__version__.py already degrades to "unknown" when the distribution is
-# absent, so importing from source without installing is supported upstream.
+# own package -- which `PYTHONPATH=src` supplies straight from the cloned repo, on
+# the capture host and the rebuild host alike. lerobot/__version__.py already
+# degrades to "unknown" when the distribution is absent, so importing from source
+# without installing is a supported upstream path.
 
 # EXPERIMENT LOGGING IS DELIBERATELY OFF, so `--wandb-to-trackio` is not passed on
 # the run stages either. LeRobot does ship wandb support (--wandb.enable), but
@@ -30,22 +31,37 @@ setup:
     export PATH=/opt/pytorch/bin:$PATH
     python -c "import sys; print('python', sys.version)"
     python -m pip install --quiet requests || true
-    # LeRobot is a framework, not a script. Install THIS checkout editable with
-    # the `training` extra (dataset + accelerate + wandb) -- exactly what
-    # src/lerobot/scripts/lerobot_train.py documents as its requirement -- so the
-    # code that runs is the forked repo's, not a PyPI release.
+    # LeRobot is a framework, not a script. Install upstream's own declared
+    # dependency set through its `training` extra (dataset + accelerate + wandb)
+    # -- exactly what src/lerobot/scripts/lerobot_train.py documents as its
+    # requirement.
     python -m pip install --constraint repro/constraints.txt -e ".[training]"
+    # ...then drop the self-install, keeping every dependency. Two reasons, both
+    # load-bearing:
+    #  (1) roar's provenance filter classifies any path under an EDITABLE
+    #      install's source dir as a "package read" and drops it. `pip install -e .`
+    #      registers the WHOLE REPOSITORY as that source dir (direct_url.json,
+    #      url=file://<repo>), so every read of data/ and outputs/ disappears and
+    #      the lineage lands as disconnected nodes with no provenance edges.
+    #  (2) this checkout declares version 0.6.2, which is not on PyPI (latest
+    #      release 0.6.1), so a recorded `lerobot==0.6.2` pin could not resolve
+    #      on a rebuild host anyway.
+    # The traced steps run `PYTHONPATH=src python -m lerobot.scripts...`, so
+    # lerobot itself comes from the clone -- which is what a rebuild host has.
+    python -m pip uninstall -y lerobot
+    python -m pip list 2>/dev/null | grep -Ei '^(torch|torchvision|torchcodec|numpy|datasets|pyarrow|accelerate|draccus|huggingface-hub|safetensors|einops|gymnasium|opencv-python-headless|wandb) ' || true
     # Gate the environment BEFORE any paid step: a `+cuNNN` local version or a
     # PEP-503 duplicate makes the recorded freeze un-installable from PyPI, so
     # the lineage could never be rebuilt. Fail here rather than at verification.
     python repro/freeze_audit.py
     python -c "import torch, torchvision; print('torch', torch.__version__, '| torchvision', torchvision.__version__, '| cuda', torch.cuda.is_available(), '|', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
-    python -c "import lerobot; print('lerobot', lerobot.__version__ if hasattr(lerobot,'__version__') else 'n/a')"
-    python -c "from lerobot.policies import make_policy; print('lerobot policies import OK')"
-    # The traced steps run `PYTHONPATH=src python -m lerobot.scripts.lerobot_train`,
-    # never the `lerobot-train` console script. Confirm that entry point resolves
-    # from the checkout, so the recorded command works on a bare clone.
-    PYTHONPATH=src python -c "import importlib.util, os; s = importlib.util.find_spec('lerobot.scripts.lerobot_train'); print('train entry module:', s.origin); assert s.origin.startswith(os.path.join(os.getcwd(), 'src')), 'lerobot must resolve from the checkout, not site-packages'"
+    # lerobot must NOT be importable without the checkout on sys.path any more --
+    # that is the proof there is no editable install left to blind the tracer.
+    if python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('lerobot') is None else 1)"; then echo "OK: lerobot is not importable as an installed distribution"; else echo "ERROR: lerobot is still installed - reads under the repo would be filtered as package reads"; exit 1; fi
+    # ...and WITH the checkout on sys.path it must resolve from src/, which is
+    # exactly what the traced steps and a rebuild host both do.
+    PYTHONPATH=src python -c "import importlib.util, os; s = importlib.util.find_spec('lerobot.scripts.lerobot_train'); print('train entry module:', s.origin); assert s.origin.startswith(os.path.join(os.getcwd(), 'src')), 'lerobot must resolve from the checkout'"
+    PYTHONPATH=src python -c "import lerobot; from lerobot.policies import make_policy; print('lerobot', lerobot.__version__, 'imported from source OK')"
     roar --version
     roar tracer use preload
     roar tracer
