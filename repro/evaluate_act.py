@@ -25,7 +25,17 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import sys
 from pathlib import Path
+
+# lerobot is supplied by the checkout, not by an install: the install happens in
+# the untraced setup stage and is not replayed on a rebuild host. Doing the path
+# insert here -- in committed code -- means a bare clone needs no environment
+# variable and no `pip install -e .` for this step to run. See repro/train_act.py.
+_SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
 import torch
 from torch.utils.data import DataLoader

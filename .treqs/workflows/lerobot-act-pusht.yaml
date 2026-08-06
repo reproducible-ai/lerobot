@@ -7,16 +7,22 @@ name: lerobot-act-pusht reproduction
 secrets:
   - HF_TOKEN            # roar put upload (the dataset itself is fetched anonymously)
 
-# WHY `PYTHONPATH=src python -m lerobot.scripts.lerobot_train` AND NOT `lerobot-train`:
-# the traced steps must be self-sufficient on a bare clone. Installing the package
-# happens in the untraced setup stage, so it is NOT part of the recorded pipeline
-# and is not replayed on a rebuild host; the console script it generates would not
-# exist there. The third-party dependencies ARE replayed (they are ordinary
-# resolvable pins in the recorded freeze), so the only missing piece is lerobot's
-# own package -- which `PYTHONPATH=src` supplies straight from the cloned repo, on
-# the capture host and the rebuild host alike. lerobot/__version__.py already
-# degrades to "unknown" when the distribution is absent, so importing from source
-# without installing is a supported upstream path.
+# WHY THE TRACED STEPS ARE `python repro/<script>.py` AND NOT `lerobot-train`:
+# every recorded step must be self-sufficient on a bare clone.
+#  * `lerobot-train` is a console script created by `pip install`. The install
+#    runs in this file's untraced setup stage, so it is not part of the recorded
+#    pipeline and is not replayed on a rebuild host, where the script would not
+#    exist. A recorded `lerobot==0.6.2` pin would not rescue it either -- that
+#    version is not published on PyPI (latest release: 0.6.1).
+#  * `PYTHONPATH=src python -m ...` would depend on an environment variable set
+#    outside the recorded command, and needs a shell, which costs the tracer its
+#    view of the Python process (a `bash -c` step recorded 10 pip packages --
+#    roar's own -- instead of the workload's 70+).
+# repro/train_act.py therefore does the `sys.path` insert itself, in committed
+# code, and calls upstream's own `lerobot.scripts.lerobot_train.main()` with
+# upstream's own arguments. repro/evaluate_act.py does the same. Nothing under
+# src/ is modified. lerobot/__version__.py already degrades to "unknown" when the
+# distribution is absent, so importing from source is a supported upstream path.
 
 # EXPERIMENT LOGGING IS DELIBERATELY OFF, so `--wandb-to-trackio` is not passed on
 # the run stages either. LeRobot does ship wandb support (--wandb.enable), but
@@ -46,8 +52,8 @@ setup:
     #  (2) this checkout declares version 0.6.2, which is not on PyPI (latest
     #      release 0.6.1), so a recorded `lerobot==0.6.2` pin could not resolve
     #      on a rebuild host anyway.
-    # The traced steps run `PYTHONPATH=src python -m lerobot.scripts...`, so
-    # lerobot itself comes from the clone -- which is what a rebuild host has.
+    # The traced steps import lerobot from the clone via repro/train_act.py and
+    # repro/evaluate_act.py, which is what a rebuild host has.
     python -m pip uninstall -y lerobot
     python -m pip list 2>/dev/null | grep -Ei '^(torch|torchvision|torchcodec|numpy|datasets|pyarrow|accelerate|draccus|huggingface-hub|safetensors|einops|gymnasium|opencv-python-headless|wandb) ' || true
     # Gate the environment BEFORE any paid step: a `+cuNNN` local version or a
@@ -78,14 +84,14 @@ fetch_dataset:
 train:
   command: |
     export PATH=/opt/pytorch/bin:$PATH
-    export PYTHONUNBUFFERED=1 PYTHONPATH=src
-    roar run -n train -- bash -c 'set -eo pipefail; python -m lerobot.scripts.lerobot_train --dataset.repo_id=lerobot/pusht_image --dataset.root=data/pusht_image --dataset.eval_split=0.1 --policy.type=act --policy.device=cuda --policy.push_to_hub=false --steps=300 --batch_size=8 --num_workers=2 --log_freq=25 --eval_steps=150 --env_eval_freq=0 --save_freq=-1 --seed=1000 --output_dir=outputs/act_pusht --job_name=act_pusht_truncated 2>&1 | tee logs/train.log'
+    export PYTHONUNBUFFERED=1
+    roar run -n train -- python repro/train_act.py --dataset.repo_id=lerobot/pusht_image --dataset.root=data/pusht_image --dataset.eval_split=0.1 --policy.type=act --policy.device=cuda --policy.push_to_hub=false --steps=300 --batch_size=8 --num_workers=2 --log_freq=25 --eval_steps=150 --env_eval_freq=0 --save_freq=-1 --seed=1000 --output_dir=outputs/act_pusht --job_name=act_pusht_truncated
   trace: off
 
 evaluate:
   command: |
     export PATH=/opt/pytorch/bin:$PATH
-    export PYTHONUNBUFFERED=1 PYTHONPATH=src
+    export PYTHONUNBUFFERED=1
     roar run -n evaluate -- python repro/evaluate_act.py --checkpoint outputs/act_pusht/checkpoints/000300/pretrained_model --repo-id lerobot/pusht_image --root data/pusht_image --eval-split 0.1 --batch-size 8 --device cuda --out metrics/metrics.json
   trace: off
 
