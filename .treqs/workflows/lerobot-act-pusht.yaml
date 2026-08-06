@@ -7,6 +7,16 @@ name: lerobot-act-pusht reproduction
 secrets:
   - HF_TOKEN            # roar put upload (the dataset itself is fetched anonymously)
 
+# WHY `PYTHONPATH=src python -m lerobot.scripts.lerobot_train` AND NOT `lerobot-train`:
+# the traced steps must be self-sufficient on a bare clone. `pip install -e .`
+# happens in the untraced setup stage, so it is NOT part of the recorded pipeline
+# and is not replayed on a rebuild host; the console script it generates would not
+# exist there. The third-party dependencies ARE replayed (they are ordinary
+# resolvable pins in the recorded freeze), so the only missing piece is lerobot's
+# own package -- which `PYTHONPATH=src` supplies straight from the cloned repo.
+# lerobot/__version__.py already degrades to "unknown" when the distribution is
+# absent, so importing from source without installing is supported upstream.
+
 # EXPERIMENT LOGGING IS DELIBERATELY OFF, so `--wandb-to-trackio` is not passed on
 # the run stages either. LeRobot does ship wandb support (--wandb.enable), but
 # under the wandb->trackio alias it aborts in WandBLogger.__init__:
@@ -32,7 +42,10 @@ setup:
     python -c "import torch, torchvision; print('torch', torch.__version__, '| torchvision', torchvision.__version__, '| cuda', torch.cuda.is_available(), '|', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
     python -c "import lerobot; print('lerobot', lerobot.__version__ if hasattr(lerobot,'__version__') else 'n/a')"
     python -c "from lerobot.policies import make_policy; print('lerobot policies import OK')"
-    which lerobot-train
+    # The traced steps run `PYTHONPATH=src python -m lerobot.scripts.lerobot_train`,
+    # never the `lerobot-train` console script. Confirm that entry point resolves
+    # from the checkout, so the recorded command works on a bare clone.
+    PYTHONPATH=src python -c "import importlib.util, os; s = importlib.util.find_spec('lerobot.scripts.lerobot_train'); print('train entry module:', s.origin); assert s.origin.startswith(os.path.join(os.getcwd(), 'src')), 'lerobot must resolve from the checkout, not site-packages'"
     roar --version
     roar tracer use preload
     roar tracer
@@ -49,14 +62,14 @@ fetch_dataset:
 train:
   command: |
     export PATH=/opt/pytorch/bin:$PATH
-    export PYTHONUNBUFFERED=1
-    roar run -n train -- bash -c 'set -eo pipefail; lerobot-train --dataset.repo_id=lerobot/pusht_image --dataset.root=data/pusht_image --dataset.eval_split=0.1 --policy.type=act --policy.device=cuda --steps=300 --batch_size=8 --num_workers=2 --log_freq=25 --eval_steps=150 --env_eval_freq=0 --save_freq=-1 --seed=1000 --output_dir=outputs/act_pusht --job_name=act_pusht_truncated 2>&1 | tee logs/train.log'
+    export PYTHONUNBUFFERED=1 PYTHONPATH=src
+    roar run -n train -- bash -c 'set -eo pipefail; python -m lerobot.scripts.lerobot_train --dataset.repo_id=lerobot/pusht_image --dataset.root=data/pusht_image --dataset.eval_split=0.1 --policy.type=act --policy.device=cuda --policy.push_to_hub=false --steps=300 --batch_size=8 --num_workers=2 --log_freq=25 --eval_steps=150 --env_eval_freq=0 --save_freq=-1 --seed=1000 --output_dir=outputs/act_pusht --job_name=act_pusht_truncated 2>&1 | tee logs/train.log'
   trace: off
 
 evaluate:
   command: |
     export PATH=/opt/pytorch/bin:$PATH
-    export PYTHONUNBUFFERED=1
+    export PYTHONUNBUFFERED=1 PYTHONPATH=src
     roar run -n evaluate -- python repro/evaluate_act.py --checkpoint outputs/act_pusht/checkpoints/000300/pretrained_model --repo-id lerobot/pusht_image --root data/pusht_image --eval-split 0.1 --batch-size 8 --device cuda --out metrics/metrics.json
   trace: off
 
