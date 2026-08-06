@@ -120,7 +120,7 @@ def main() -> int:
                 continue
             if cfg.max_batches and n_batches >= cfg.max_batches:
                 break
-            target = batch[ACTION].to(device).float()
+            target = batch[ACTION].detach().float().cpu()
             for cam in camera_keys:
                 if cam in batch and batch[cam].dtype == torch.uint8:
                     batch[cam] = batch[cam].to(dtype=torch.float32) / 255.0
@@ -128,8 +128,14 @@ def main() -> int:
             loss, _ = policy(processed)
             loss_sum += float(loss.item())
 
+            # The postprocessor un-normalises and hands the action back on CPU
+            # (it is the robot-facing end of the pipeline), while the batch tensors
+            # are on the accelerator — so compare on CPU rather than assuming either.
             action = postprocessor(policy.predict_action_chunk(processed))
-            l1_sum += float(torch.nn.functional.l1_loss(action[:, : target.shape[1]], target).item())
+            action = action.detach().float().cpu()
+            l1_sum += float(
+                torch.nn.functional.l1_loss(action[:, : target.shape[1]], target).item()
+            )
 
             n_batches += 1
             n_samples += int(target.shape[0])
