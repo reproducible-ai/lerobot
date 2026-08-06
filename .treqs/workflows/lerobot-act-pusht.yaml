@@ -83,9 +83,15 @@ fetch_dataset:
 
 train:
   command: |
+    # `--num_workers=0` is not a performance choice, it is a provenance one. With
+    # DataLoader workers (spawn), this step recorded only 10 pip packages -- roar's
+    # own -- while the single-process steps recorded 74. `accelerate` and
+    # `termcolor`, which lerobot_train.py needs, were then missing from the whole
+    # recorded environment, so a rebuild would fail on an import. Single-process
+    # loading costs a few seconds on a 31 MB dataset and makes the record complete.
     export PATH=/opt/pytorch/bin:$PATH
     export PYTHONUNBUFFERED=1
-    roar run -n train -- python repro/train_act.py --dataset.repo_id=lerobot/pusht_image --dataset.root=data/pusht_image --dataset.eval_split=0.1 --policy.type=act --policy.device=cuda --policy.push_to_hub=false --steps=300 --batch_size=8 --num_workers=2 --log_freq=25 --eval_steps=150 --env_eval_freq=0 --save_freq=-1 --seed=1000 --output_dir=outputs/act_pusht --job_name=act_pusht_truncated
+    roar run -n train -- python repro/train_act.py --dataset.repo_id=lerobot/pusht_image --dataset.root=data/pusht_image --dataset.eval_split=0.1 --policy.type=act --policy.device=cuda --policy.push_to_hub=false --steps=300 --batch_size=8 --num_workers=0 --log_freq=25 --eval_steps=150 --env_eval_freq=0 --save_freq=-1 --seed=1000 --output_dir=outputs/act_pusht --job_name=act_pusht_truncated
   trace: off
 
 evaluate:
