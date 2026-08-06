@@ -79,7 +79,7 @@ coverage.xml
 !tests/artifacts
 
 ### Logs & Temporary Files ###
-logs/
+# logs/   <-- see the reproduction block at the end of this file
 tmp/
 *.log
 pip-log.txt
@@ -163,8 +163,8 @@ wandb/
 .dev/
 
 # Data folders
-data/
-outputs/
+# data/   <-- see the reproduction block at the end of this file
+# outputs/   <-- see the reproduction block at the end of this file
 
 # Translations
 *.mo
@@ -176,3 +176,25 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# roar state — the generated setup stage runs `roar init`, which creates
+# .roar/. Without this rule the worktree goes dirty and the FIRST PAID
+# `roar run` refuses to execute ("Run blocked: untracked files").
+.roar/
+# --- reproduction outputs (scaffold_row.py: mnist rule) ---
+# file-pattern ignore + tracked .gitkeep so each dir survives a clean
+# checkout and roar keeps the outputs in lineage. NEVER dir-ignore.
+data/*
+!data/.gitkeep
+outputs/*
+!outputs/.gitkeep
+metrics/*
+!metrics/.gitkeep
+logs/*
+!logs/.gitkeep
+# NOTE: the final checkpoint lives at
+# outputs/act_pusht/checkpoints/000300/pretrained_model/model.safetensors.
+# Its tracked ancestor is outputs/ above; lerobot-train creates the nested
+# dirs itself, and a .gitkeep committed *inside* the checkpoint dir would be
+# a tracked file that the training run is free to overwrite or remove --
+# which would dirty the tree and block the next `roar run`.

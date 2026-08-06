@@ -1,0 +1,16 @@
+# Pip constraints for the Reproducible AI Campaign reproduction of LeRobot ACT.
+#
+# The runner image ships a PyPI-plain torch family (no `+cuNNN` PEP 440 local
+# version), which is what makes a recorded pip freeze installable from PyPI by
+# anyone. lerobot's own pins (torch>=2.7,<2.12; torchvision>=0.22,<0.27) are
+# already satisfied by those versions, so pip leaves them alone -- these
+# constraints just make that explicit, so a future resolver change cannot
+# silently swap in a CUDA-index build and make the lineage un-rebuildable.
+torch==2.7.0
+torchvision==0.22.0
+
+# torchcodec is pulled in unconditionally by lerobot[dataset]. Its extension is
+# built against a specific torch; the 0.4.x series is the torch-2.7 pairing.
+# (This reproduction uses the image-based lerobot/pusht_image dataset, so no
+# video is decoded and lerobot falls back to PyAV if torchcodec cannot load.)
+torchcodec==0.4.0
