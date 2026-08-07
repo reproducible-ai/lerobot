@@ -65,7 +65,13 @@ setup:
     export PATH=$PATH:/root/.local/bin:/usr/local/bin
     command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; }
     command -v uv
-    uv tool install --python 3.12.10 --force /tmp/roar_wheel/roar_cli-0.4.4.dev0-cp310-abi3-linux_x86_64.whl
+    # `--with huggingface-hub`: `uv tool install` gives roar an ISOLATED venv, and
+    # this wheel declares huggingface-hub only under its `dev` extra -- so the
+    # publish stage (`roar put ... hf://`) dies with
+    # "No module named 'huggingface_hub'" after every traced step has succeeded.
+    # It goes in roar's own venv, not the workload's, so it does not touch the
+    # recorded environment.
+    uv tool install --python 3.12.10 --force --with huggingface-hub /tmp/roar_wheel/roar_cli-0.4.4.dev0-cp310-abi3-linux_x86_64.whl
     # ...and ask uv where it put the entrypoints rather than assuming /root.
     sudo ln -sf "$(uv tool dir --bin 2>/dev/null || echo /root/.local/bin)/roar" /usr/local/bin/roar
     test "$(roar --version | grep -o '[0-9][^ ]*$')" = "0.4.4.dev0" || \
