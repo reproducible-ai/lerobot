@@ -198,3 +198,8 @@ logs/*
 # dirs itself, and a .gitkeep committed *inside* the checkpoint dir would be
 # a tracked file that the training run is free to overwrite or remove --
 # which would dirty the tree and block the next `roar run`.
+
+# `treqs project use` writes the project binding here. It is per-clone local
+# state, not part of the recipe, and leaving it untracked dirties the worktree,
+# which blocks `roar run` ("Run blocked: untracked files").
+.treqs/config.toml
