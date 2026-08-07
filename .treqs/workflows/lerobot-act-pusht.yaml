@@ -58,8 +58,16 @@ setup:
                 /opt/pytorch/bin/roar /opt/pytorch/bin/roar-worker \
                 /usr/local/lib/python3.10/dist-packages/roar_inject.pth \
                 /opt/pytorch/lib/python3.12/site-packages/roar_inject.pth
+    # `uv` is not on PATH on every campaign AMI (this stage runs as root, and
+    # /root/.local/bin is not always inherited), and the generated block calls it
+    # unqualified -- so make it explicit and bootstrap it if the image lacks it.
+    # This stage is `trace: off`, so nothing here reaches the lineage.
+    export PATH=$PATH:/root/.local/bin:/usr/local/bin
+    command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; }
+    command -v uv
     uv tool install --python 3.12.10 --force /tmp/roar_wheel/roar_cli-0.4.4.dev0-cp310-abi3-linux_x86_64.whl
-    sudo ln -sf /root/.local/bin/roar /usr/local/bin/roar
+    # ...and ask uv where it put the entrypoints rather than assuming /root.
+    sudo ln -sf "$(uv tool dir --bin 2>/dev/null || echo /root/.local/bin)/roar" /usr/local/bin/roar
     test "$(roar --version | grep -o '[0-9][^ ]*$')" = "0.4.4.dev0" || \
       { echo "WRONG ROAR: $(roar --version)"; exit 1; }
     test "$(ls /usr/local/bin/../lib/python3.10/dist-packages/roar/bin 2>/dev/null | wc -l)" != "0" || \
