@@ -14,7 +14,11 @@ name: lerobot-act-pusht reproduction
 
 secrets:
   - HF_TOKEN            # roar put upload (the dataset itself is fetched anonymously)
-  - ROAR_WHEEL_URL      # presigned URL of the roar wheel pinned by sha256 below
+# NOTE: the provenance CLI is no longer fetched from a presigned URL held in a
+# per-target secret. It is a PUBLISHED build, installed by name+version from a
+# public index and verified by wheel sha256 (repro/verify_roar_wheel.py). That
+# removes a shared mutable secret from the run: two operators sharing this
+# compute target can no longer overwrite each other's tooling.
 
 # WHY THE TRACED STEPS ARE `python repro/<script>.py` AND NOT `lerobot-train`:
 # every recorded step must be self-sufficient on a bare clone.
@@ -48,8 +52,6 @@ setup:
     python -c "import sys; print('python', sys.version)"
     python -m pip install --quiet requests || true
     rm -rf *.egg-info src/*.egg-info
-    curl -sS -o /tmp/roar_wheel/roar_cli-0.4.4.dev0-cp310-abi3-linux_x86_64.whl --create-dirs "$ROAR_WHEEL_URL"
-    echo "a5bcde02f6a1f7bfa29ee52044f69fb72a87a1f3b6867db6911e8e82749415f0  /tmp/roar_wheel/roar_cli-0.4.4.dev0-cp310-abi3-linux_x86_64.whl" | sha256sum -c -
     sudo rm -rf /usr/local/lib/python3.10/dist-packages/roar_cli-*.dist-info \
                 /usr/local/lib/python3.10/dist-packages/roar \
                 /opt/pytorch/lib/python3.12/site-packages/roar_cli-*.dist-info \
@@ -65,17 +67,41 @@ setup:
     export PATH=$PATH:/root/.local/bin:/usr/local/bin
     command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh; }
     command -v uv
-    # `--with huggingface-hub`: `uv tool install` gives roar an ISOLATED venv, and
-    # this wheel declares huggingface-hub only under its `dev` extra -- so the
-    # publish stage (`roar put ... hf://`) dies with
-    # "No module named 'huggingface_hub'" after every traced step has succeeded.
-    # It goes in roar's own venv, not the workload's, so it does not touch the
-    # recorded environment.
-    uv tool install --python 3.12.10 --force --with huggingface-hub /tmp/roar_wheel/roar_cli-0.4.4.dev0-cp310-abi3-linux_x86_64.whl
+    # The provenance CLI must run under the SAME interpreter the workload records.
+    # Installing it under the host's system python lets that interpreter's
+    # dist-packages shadow the recorded pins inside the traced child, which can
+    # make a run pass against host packages instead of the recorded ones. So the
+    # interpreter is read off the workload's own python rather than hard-coded.
+    RECORDED_PY="$(python -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+    echo "recorded interpreter: $RECORDED_PY"
+    # `--index-strategy unsafe-best-match` is REQUIRED, not optional: uv gives an
+    # --extra-index-url priority over the --index-url, so with the default
+    # first-match strategy it finds roar-cli on the main index, never sees this
+    # version, and dies with "no version of roar-cli==0.4.4rc2". Verified locally
+    # before this run. The build is then pinned by sha256 immediately below, which
+    # is what actually establishes identity.
+    # `--with huggingface-hub`: belt and braces. This build finally declares
+    # huggingface-hub as a real runtime dependency, but the publish stage
+    # (`roar put ... hf://`) is the step that dies -- after every traced step has
+    # succeeded -- if it is ever absent, so the flag stays. It goes in the CLI's
+    # own isolated venv, not the workload's, so it does not touch the recorded
+    # environment.
+    uv tool install --python "$RECORDED_PY" --force --with huggingface-hub \
+        --index-strategy unsafe-best-match \
+        --index-url https://test.pypi.org/simple/ \
+        --extra-index-url https://pypi.org/simple/ \
+        roar-cli==0.4.4rc2
     # ...and ask uv where it put the entrypoints rather than assuming /root.
     sudo ln -sf "$(uv tool dir --bin 2>/dev/null || echo /root/.local/bin)/roar" /usr/local/bin/roar
-    test "$(roar --version | grep -o '[0-9][^ ]*$')" = "0.4.4.dev0" || \
+    test "$(roar --version | grep -o '[0-9][^ ]*$')" = "0.4.4rc2" || \
       { echo "WRONG ROAR: $(roar --version)"; exit 1; }
+    # A version string is not an identity -- distinct builds have shipped under one
+    # version string on this project before. Pin the artefact by wheel sha256 and
+    # prove the installed files came from that wheel.
+    ROAR_WHEEL_SCRATCH=/var/tmp python repro/verify_roar_wheel.py \
+      --version 0.4.4rc2 \
+      --sha256 3677618d4c42d66143baf42912c8ed932f9706d5511d032bb2898fda6a465471 \
+      --exe "$(command -v roar)"
     test "$(ls /usr/local/bin/../lib/python3.10/dist-packages/roar/bin 2>/dev/null | wc -l)" != "0" || \
       test "$(ls $(dirname $(readlink -f $(command -v roar)))/../lib/python*/site-packages/roar/bin | wc -l)" -ge 6 || \
       { echo "NO TRACER BINARIES"; exit 1; }
@@ -119,6 +145,11 @@ setup:
     # rebuild host both do.
     python -c "import os, sys; sys.path.insert(0, os.path.abspath('src')); import importlib.util; s=importlib.util.find_spec('lerobot.scripts.lerobot_train'); print('train entry module:', s.origin); assert s.origin.startswith(os.path.join(os.getcwd(), 'src')), 'lerobot must resolve from the checkout'"
     python -c "import os, sys; sys.path.insert(0, os.path.abspath('src')); import lerobot; from lerobot.policies import make_policy; print('lerobot', lerobot.__version__, 'imported from source OK')"
+    # Diagnostic only, never fatal: record which package roots this interpreter
+    # exposes and what lives under the base image's system root, so the recorded
+    # package list can afterwards be read against the environment it came from
+    # instead of being taken on trust.
+    python repro/substrate_probe.py || true
     git status --porcelain
     roar init || true
   trace: off
