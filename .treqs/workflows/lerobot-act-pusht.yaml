@@ -36,51 +36,6 @@ secrets:
 # src/ is modified. lerobot/__version__.py already degrades to "unknown" when the
 # distribution is absent, so importing from source is a supported upstream path.
 
-# EXPERIMENT LOGGING IS NOW ON -- BY CONFIGURATION ONLY. Nothing under src/ is
-# modified; the three flags below are upstream's own, already implemented:
-#   --wandb.enable=true          WandBConfig.enable defaults False
-#                                (src/lerobot/configs/default.py:94); the call site
-#                                gates on `cfg.wandb.enable and cfg.wandb.project`
-#                                (src/lerobot/scripts/lerobot_train.py:393).
-#   --wandb.project=...          required by that same gate.
-#   --wandb.disable_artifact=true  NOT optional. With logging on, LeRobot's
-#                                WandBLogger.log_policy() calls wandb.log_artifact()
-#                                at every checkpoint save. The tracker implements
-#                                log_artifact for real, so without this flag the run
-#                                would upload the ~207 MB model.safetensors to the
-#                                Space on every save. log_policy() returns early when
-#                                disable_artifact is set (wandb_utils.py:126).
-#
-# WHY `env TRACKIO_SPACE_ID=... ` IS INSIDE THE RECORDED COMMAND, NOT AN `export`
-# ABOVE IT. This is the single most important line in this file and it is easy to
-# get wrong in a way that passes capture and fails every rebuild.
-#
-# `roar run` records ARGV ONLY. Environment set on a preceding line of this stage is
-# NOT part of the lineage and is NOT replayed by `roar reproduce`. The wandb->trackio
-# bridge chooses its mode from the environment of the traced child:
-#   * TRACKIO_SPACE_ID set  -> alias wandb to trackio  (this Run HAS get_url())
-#   * TRACKIO_SPACE_ID unset -> alias wandb to a silent no-op stub
-# and the no-op stub's _Run class implements only summary/config/id/name/log/finish/
-# watch/log_code -- it has NO get_url. LeRobot calls wandb.run.get_url() unguarded at
-# src/lerobot/common/wandb_utils.py:122, during WandBLogger.__init__, before training
-# step 1. So with the space id merely `export`ed around the command, this step would
-# succeed at capture and die on every rebuild host with
-#   AttributeError: '_Run' object has no attribute 'get_url'
-# Verified directly against the installed 0.4.4rc5 bridge, both branches.
-#
-# Putting the assignment inside the argv makes the requirement travel with the
-# record: `roar reproduce` replays the command verbatim, so a rebuild host takes the
-# trackio-alias branch too and get_url() resolves. `env` is exec, not a shell, so the
-# tracer keeps its view of the Python process -- measured identically (in:0 out:1) for
-# `env VAR=v python probe.py` and for bare `python probe.py`. And reproduce does not
-# rewrite argv[0]; it only prepends the rebuilt venv's bin to PATH, so the `python`
-# that `env` resolves is still the recorded interpreter.
-#
-# A rebuild host has no HF_TOKEN, so its trackio falls back to local logging and
-# uploads nothing -- warnings, exit 0, no credential required. That is the intended
-# third-party path, and it is why trackio must be a RECORDED PIN: if `import trackio`
-# fails on the rebuild host the bridge silently drops to the no-op stub and the
-# get_url crash returns.
 
 setup:
   command: |
