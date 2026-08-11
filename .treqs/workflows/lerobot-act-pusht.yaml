@@ -36,15 +36,51 @@ secrets:
 # src/ is modified. lerobot/__version__.py already degrades to "unknown" when the
 # distribution is absent, so importing from source is a supported upstream path.
 
-# EXPERIMENT LOGGING IS DELIBERATELY OFF, so `--wandb-to-trackio` is not passed on
-# the run stages either. LeRobot does ship wandb support (`--wandb.enable=true`),
-# but under any wandb-compatible tracker that is not wandb itself it aborts in
-# WandBLogger.__init__: src/lerobot/common/wandb_utils.py:122 calls
-# `wandb.run.get_url()` unguarded, and trackio's Run has no such method (verified
-# against trackio 0.34.0: `get_url` does not appear anywhere in the package).
-# Rather than patch upstream to accommodate the tracker, this row runs with
-# logging off; the held-out metric is computed by the evaluate step and recorded
-# as metrics/metrics.json instead.
+# EXPERIMENT LOGGING IS NOW ON -- BY CONFIGURATION ONLY. Nothing under src/ is
+# modified; the three flags below are upstream's own, already implemented:
+#   --wandb.enable=true          WandBConfig.enable defaults False
+#                                (src/lerobot/configs/default.py:94); the call site
+#                                gates on `cfg.wandb.enable and cfg.wandb.project`
+#                                (src/lerobot/scripts/lerobot_train.py:393).
+#   --wandb.project=...          required by that same gate.
+#   --wandb.disable_artifact=true  NOT optional. With logging on, LeRobot's
+#                                WandBLogger.log_policy() calls wandb.log_artifact()
+#                                at every checkpoint save. The tracker implements
+#                                log_artifact for real, so without this flag the run
+#                                would upload the ~207 MB model.safetensors to the
+#                                Space on every save. log_policy() returns early when
+#                                disable_artifact is set (wandb_utils.py:126).
+#
+# WHY `env TRACKIO_SPACE_ID=... ` IS INSIDE THE RECORDED COMMAND, NOT AN `export`
+# ABOVE IT. This is the single most important line in this file and it is easy to
+# get wrong in a way that passes capture and fails every rebuild.
+#
+# `roar run` records ARGV ONLY. Environment set on a preceding line of this stage is
+# NOT part of the lineage and is NOT replayed by `roar reproduce`. The wandb->trackio
+# bridge chooses its mode from the environment of the traced child:
+#   * TRACKIO_SPACE_ID set  -> alias wandb to trackio  (this Run HAS get_url())
+#   * TRACKIO_SPACE_ID unset -> alias wandb to a silent no-op stub
+# and the no-op stub's _Run class implements only summary/config/id/name/log/finish/
+# watch/log_code -- it has NO get_url. LeRobot calls wandb.run.get_url() unguarded at
+# src/lerobot/common/wandb_utils.py:122, during WandBLogger.__init__, before training
+# step 1. So with the space id merely `export`ed around the command, this step would
+# succeed at capture and die on every rebuild host with
+#   AttributeError: '_Run' object has no attribute 'get_url'
+# Verified directly against the installed 0.4.4rc5 bridge, both branches.
+#
+# Putting the assignment inside the argv makes the requirement travel with the
+# record: `roar reproduce` replays the command verbatim, so a rebuild host takes the
+# trackio-alias branch too and get_url() resolves. `env` is exec, not a shell, so the
+# tracer keeps its view of the Python process -- measured identically (in:0 out:1) for
+# `env VAR=v python probe.py` and for bare `python probe.py`. And reproduce does not
+# rewrite argv[0]; it only prepends the rebuilt venv's bin to PATH, so the `python`
+# that `env` resolves is still the recorded interpreter.
+#
+# A rebuild host has no HF_TOKEN, so its trackio falls back to local logging and
+# uploads nothing -- warnings, exit 0, no credential required. That is the intended
+# third-party path, and it is why trackio must be a RECORDED PIN: if `import trackio`
+# fails on the rebuild host the bridge silently drops to the no-op stub and the
+# get_url crash returns.
 
 setup:
   command: |
@@ -77,7 +113,7 @@ setup:
     # `--index-strategy unsafe-best-match` is REQUIRED, not optional: uv gives an
     # --extra-index-url priority over the --index-url, so with the default
     # first-match strategy it finds roar-cli on the main index, never sees this
-    # version, and dies with "no version of roar-cli==0.4.4rc2". Verified locally
+    # version, and dies with "no version of roar-cli==0.4.4rc5". Verified locally
     # before this run. The build is then pinned by sha256 immediately below, which
     # is what actually establishes identity.
     # `--with huggingface-hub`: belt and braces. This build finally declares
@@ -90,17 +126,17 @@ setup:
         --index-strategy unsafe-best-match \
         --index-url https://test.pypi.org/simple/ \
         --extra-index-url https://pypi.org/simple/ \
-        roar-cli==0.4.4rc2
+        roar-cli==0.4.4rc5
     # ...and ask uv where it put the entrypoints rather than assuming /root.
     sudo ln -sf "$(uv tool dir --bin 2>/dev/null || echo /root/.local/bin)/roar" /usr/local/bin/roar
-    test "$(roar --version | grep -o '[0-9][^ ]*$')" = "0.4.4rc2" || \
+    test "$(roar --version | grep -o '[0-9][^ ]*$')" = "0.4.4rc5" || \
       { echo "WRONG ROAR: $(roar --version)"; exit 1; }
     # A version string is not an identity -- distinct builds have shipped under one
     # version string on this project before. Pin the artefact by wheel sha256 and
     # prove the installed files came from that wheel.
     ROAR_WHEEL_SCRATCH=/var/tmp python repro/verify_roar_wheel.py \
-      --version 0.4.4rc2 \
-      --sha256 3677618d4c42d66143baf42912c8ed932f9706d5511d032bb2898fda6a465471 \
+      --version 0.4.4rc5 \
+      --sha256 ed35ed6bda3b5698ab65a887e7390c2ac073123f6d94bfa27b8282285352219c \
       --exe "$(command -v roar)"
     test "$(ls /usr/local/bin/../lib/python3.10/dist-packages/roar/bin 2>/dev/null | wc -l)" != "0" || \
       test "$(ls $(dirname $(readlink -f $(command -v roar)))/../lib/python*/site-packages/roar/bin | wc -l)" -ge 6 || \
@@ -112,6 +148,13 @@ setup:
     # Install upstream's declared `training` extra (dataset + accelerate +
     # wandb) -- exactly what src/lerobot/scripts/lerobot_train.py needs.
     python -m pip install --constraint repro/constraints.txt -e ".[training]"
+    # `trackio` is the tracker the wandb->trackio bridge aliases `wandb` onto. It
+    # must be importable BY THE WORKLOAD'S OWN INTERPRETER: the bridge does a plain
+    # `import trackio` inside the traced child and falls back to a no-op stub (no
+    # get_url -> LeRobot crashes) if that import fails. It is a normal public PyPI
+    # package, it is genuinely loaded by this run, and it therefore belongs in the
+    # recorded environment rather than being smuggled in from the CLI's own venv.
+    python -m pip install --constraint repro/constraints.txt trackio
     # ...then drop the self-install, keeping every dependency. roar's provenance
     # filter classifies any path under an EDITABLE install's source dir as a
     # "package read" and drops it, and `pip install -e .` registers the WHOLE
@@ -150,6 +193,36 @@ setup:
     # package list can afterwards be read against the environment it came from
     # instead of being taken on trust.
     python repro/substrate_probe.py || true
+    # The bridge takes the trackio branch only if the WORKLOAD interpreter can
+    # import trackio. Assert it here rather than discovering the silent no-op
+    # fallback after training has already run.
+    python -c "import trackio; print('trackio', trackio.__version__)"
+    # The bridge uploads only when a token is present; without one it buffers
+    # locally and the published dashboard is EMPTY while still returning HTTP 200.
+    # So prove the token reached this task's environment before paying for a run.
+    # Value never printed -- length only.
+    python -c "import os,sys; t=os.environ.get('HF_TOKEN') or ''; print('HF_TOKEN present in task env:', bool(t), '| length:', len(t)); sys.exit(0 if t else 1)"
+    # --- COST-MODEL MEASUREMENT, not part of the pipeline ------------------
+    # ACT's default backbone is `resnet18` with
+    # pretrained_backbone_weights="ResNet18_Weights.IMAGENET1K_V1"
+    # (src/lerobot/policies/act/configuration_act.py:98-99), so the first policy
+    # construction downloads torchvision's ImageNet checkpoint from
+    # download.pytorch.org. That download is inside the train step's wall-clock on
+    # any cold host, and previous full-run estimates for this row had to EXCLUDE it
+    # as an unquantified caveat. Time it here into a THROWAWAY TORCH_HOME so the
+    # real cache stays cold and the train step still pays the cost it would pay on
+    # a fresh machine -- this only measures the size of that component, it does not
+    # remove it. Never fatal.
+    rm -rf /var/tmp/torchhome-probe
+    TORCH_HOME=/var/tmp/torchhome-probe python -c "
+import time, torchvision, os
+t0 = time.time()
+torchvision.models.resnet18(weights='ResNet18_Weights.IMAGENET1K_V1')
+dt = time.time() - t0
+tot = sum(os.path.getsize(os.path.join(d,f)) for d,_,fs in os.walk('/var/tmp/torchhome-probe') for f in fs)
+print('RESNET18_IMAGENET_WEIGHTS_DOWNLOAD_SECONDS %.2f BYTES %d' % (dt, tot))
+" || true
+    rm -rf /var/tmp/torchhome-probe
     git status --porcelain
     roar init || true
   trace: off
@@ -170,7 +243,7 @@ train:
     # loading costs seconds on a 31 MB dataset and makes the record complete.
     export PATH=/opt/pytorch/bin:$PATH
     export PYTHONUNBUFFERED=1
-    roar run -n train -- python repro/train_act.py --dataset.repo_id=lerobot/pusht_image --dataset.root=data/pusht_image --dataset.eval_split=0.1 --policy.type=act --policy.device=cuda --policy.push_to_hub=false --steps=300 --batch_size=8 --num_workers=0 --log_freq=25 --eval_steps=150 --env_eval_freq=0 --save_freq=-1 --seed=1000 --output_dir=outputs/act_pusht --job_name=act_pusht_truncated
+    roar run -n train --wandb-to-trackio -- env TRACKIO_SPACE_ID=reproducible-ai/experiments python repro/train_act.py --dataset.repo_id=lerobot/pusht_image --dataset.root=data/pusht_image --dataset.eval_split=0.1 --policy.type=act --policy.device=cuda --policy.push_to_hub=false --steps=300 --batch_size=8 --num_workers=0 --log_freq=25 --eval_steps=150 --env_eval_freq=0 --save_freq=-1 --seed=1000 --output_dir=outputs/act_pusht --job_name=act_pusht_truncated --wandb.enable=true --wandb.project=lerobot-act-pusht --wandb.disable_artifact=true
   trace: off
 
 evaluate:
