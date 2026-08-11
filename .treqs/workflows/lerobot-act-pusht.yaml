@@ -214,14 +214,7 @@ setup:
     # a fresh machine -- this only measures the size of that component, it does not
     # remove it. Never fatal.
     rm -rf /var/tmp/torchhome-probe
-    TORCH_HOME=/var/tmp/torchhome-probe python -c "
-import time, torchvision, os
-t0 = time.time()
-torchvision.models.resnet18(weights='ResNet18_Weights.IMAGENET1K_V1')
-dt = time.time() - t0
-tot = sum(os.path.getsize(os.path.join(d,f)) for d,_,fs in os.walk('/var/tmp/torchhome-probe') for f in fs)
-print('RESNET18_IMAGENET_WEIGHTS_DOWNLOAD_SECONDS %.2f BYTES %d' % (dt, tot))
-" || true
+    TORCH_HOME=/var/tmp/torchhome-probe python -c "import time, torchvision, os; t0=time.time(); torchvision.models.resnet18(weights='ResNet18_Weights.IMAGENET1K_V1'); dt=time.time()-t0; tot=sum(os.path.getsize(os.path.join(d,f)) for d,_,fs in os.walk('/var/tmp/torchhome-probe') for f in fs); print('RESNET18_IMAGENET_WEIGHTS_DOWNLOAD_SECONDS %.2f BYTES %d' % (dt, tot))" || true
     rm -rf /var/tmp/torchhome-probe
     git status --porcelain
     roar init || true
